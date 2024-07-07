@@ -1,0 +1,122 @@
+--- 
+- hosts: all
+  become: true
+  tasks:
+    - name: Installing borgbackup service
+      apt:
+        name: borgbackup
+        update_cache: yes
+        state: present
+
+
+- name: Configuring -backup- host
+  hosts: backup
+  become: true
+  tasks:
+    - name: Adding a new partition on disk
+      parted:
+        device: /dev/sdc 
+        number: 1
+        state: present
+    
+    - name: Creating filesystem on disk
+      filesystem:
+        fstype: xfs
+        dev: /dev/sdc1
+    
+    - name: Adding user -borg-
+      user:
+        name: borg
+        shell: /bin/bash
+
+    - name: Creating directory for backup
+      file:
+        path: /var/backup
+        state: directory
+        
+    - name: Mounting /dev/sdc1 to /var/backup
+      mount: 
+        path: /var/backup
+        src: /dev/sdc1
+        fstype: xfs
+        state: mounted
+     
+    - name: Changing permissions on /var/backup after mounting
+      file:
+        path: /var/backup
+        state: directory
+        mode: 0755
+        owner: borg
+        group: borg        
+
+
+- name: Configuring -client- host
+  hosts: client
+  become: true
+  tasks:
+    - name: Generating ssh keys
+      openssh_keypair:
+        path: /root/.ssh/id_rsa
+
+    - name: Receiving public key
+      shell: cat /root/.ssh/id_rsa.pub
+      register: public_key
+      changed_when: false
+
+    - name: Ensure server is present in known_host file
+      shell: ssh-keyscan {{ hostvars['backup'].ansible_ssh_host }} >> ~/.ssh/known_hosts
+      args:
+        creates: ~/.ssh/known_hosts
+      ignore_errors: true
+
+
+- name: Configuring -backup- host
+  hosts: backup
+  become: true
+  tasks:
+    - name: Adding authorized key
+      authorized_key:
+        user: borg
+        key: "{{ hostvars['client'].public_key.stdout }}"
+  ignore_errors: true
+  
+- name: Configuring -client- host
+  hosts: client
+  become: true
+  tasks:
+    - name: Copying systemd service borg
+      copy:
+        src: files/borg.service
+        dest: /etc/systemd/system/borg.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Copying systemd timer borg
+      copy: 
+        src: files/borg.timer
+        dest: /etc/systemd/system/borg.timer
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Init borg repo
+      shell: borg init --encryption=repokey borg@{{ hostvars['backup'].ansible_ssh_host }}:/var/backup;\
+      environment:
+        BORG_PASSPHRASE: "otus2024"
+      ignore_errors: true
+       
+    - name: Starting borg timer
+      systemd:
+        name: borg.timer
+        state: started
+        enabled: yes
+      ignore_errors: true
+      
+    - name: Starting borg service
+      systemd:
+        name: borg.service
+        state: started
+        enabled: yes
+      ignore_errors: true      
+...
